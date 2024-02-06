@@ -1,0 +1,56 @@
+# An example yaml for serving Code Llama model from Meta with an OpenAI API.
+# Usage:
+#  1. Launch on a single instance: `sky launch -c code-llama ./endpoint.yaml`
+#  2. Scale up to multiple replicas with a single endpoint:
+#     `sky serve up -n code-llama ./endpoint.yaml`
+service:
+  readiness_probe:
+    path: /v1/completions
+    post_data:
+      model: $MODEL_NAME
+      prompt: "def hello_world():"
+      max_tokens: 1
+    initial_delay_seconds: 1800
+  replicas: 2
+
+envs:
+  MODEL_NAME: codellama/CodeLlama-7b-Instruct-hf
+
+resources:
+  accelerators: {A10G:1, V100-32GB:1}
+  disk_size: 256
+  memory: 32+
+  ports: 8000
+  use_spot: True
+  cloud: aws
+
+setup: |
+  conda activate codellama
+  if [ $? -ne 0 ]; then
+    conda create -n codellama python=3.10 -y
+    conda activate codellama
+  fi
+
+  #  pip list | grep vllm || pip install "git+https://github.com/vllm-project/vllm.git"
+  git clone  https://github.com/vllm-project/vllm.git
+  cd vllm
+  pip install .
+  pip install git+https://github.com/huggingface/transformers
+  pip install gradio
+
+run: |
+  conda activate codellama
+  export PATH=$PATH:/sbin
+  # Reduce --max-num-seqs to avoid OOM during loading model on L4:8
+  python -u -m vllm.entrypoints.openai.api_server \
+    --host 0.0.0.0 \
+    --model $MODEL_NAME \
+    --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
+    --max-model-len 10000 2>&1 | tee api_server.log &
+ 
+  echo 'Waiting for vllm api server to start...'
+  while ! `cat api_server.log | grep -q 'Uvicorn running on'`; do sleep 1; done
+
+  echo 'Starting Web Server'
+  python vllm/examples/gradio_webserver.py
+
